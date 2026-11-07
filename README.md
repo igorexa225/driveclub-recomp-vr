@@ -9,13 +9,14 @@ This is not DriveClub VR: it is the full game with experimental VR added on top.
 - Each eye drawn at the size your headset asks for and handed over pixel for pixel, with a scale for supersampling
 - Anti-aliasing for the headset: the game's TAA, SMAA or DLSS per eye; glow, exposure, head smoothing and foveated
   rendering on the launcher's VR tab
+- Exposure made for a headset: no white flashes out of shaded turns, day and night alike
 - Virtual Desktop and SteamVR (OpenXR); Meta Link judders in True stereo
 
 **Download:** [test builds on the Releases page](../../releases) · **Setup:** `VR QUICK START.txt` in the zip ([VR README](packaging/vr/README.md))
 
 **Videos:** [game window (left eye)](https://www.youtube.com/watch?v=bggpZ7TnL6A) · [recorded in the headset](https://www.youtube.com/watch?v=MXfFgH9S0eQ)
 
-Status: experimental test builds (latest: vr6, on DriveClub Recomp 0.4.1), tested on a Quest 2 with an RTX 4070 Ti SUPER (Virtual Desktop and SteamVR).
+Status: experimental test builds (latest: vr7, on DriveClub Recomp 0.4.1), tested on a Quest 2 with an RTX 4070 Ti SUPER (Virtual Desktop and SteamVR).
 VR is off by default; with it off the game runs as in the main project.
 
 Main project: [OverkillLabs3/driveclub-recomp](https://github.com/OverkillLabs3/driveclub-recomp) · VR draft PR: [#177](https://github.com/OverkillLabs3/driveclub-recomp/pull/177)
