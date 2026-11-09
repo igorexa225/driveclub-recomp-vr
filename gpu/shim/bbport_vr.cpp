@@ -195,7 +195,8 @@ struct Settings {
     // glow = <percent>: the game's glow (its bloom, a blurred copy of the picture added over it) in true stereo, 100 as
     // the game draws it (GlowScale; BB_VR_GLOW, Shift and the \ key)
     int glow = 100;
-    // exposure_log = 1: the game's auto-exposure value twice a second with the head's pitch (ExposureLog)
+    // exposure_log = 1: the game's auto-exposure value four times a second with the head's pitch, the pedals, the speed
+    // and the camera's pitch, in flat play too (ExposureLog)
     bool exposure_log = false;
     bool jitter_log = false; // JitterLog
     // dev_keys = 1 (or draw_trace): the keys for comparing and saving pictures (7, 8, 9, - ` . , / ' \ ; =). Without it
@@ -212,6 +213,17 @@ struct Settings {
     // the turn opened up; a few seconds of that now move it by a fraction of a stop, while a sunset in a race (a
     // slower change) is followed as the game sets it. No fixed ceiling: night tracks need 7-9 stops more than day.
     float exposure_rate = 3.0f;
+    // exposure_gate: once the game has wanted a picture brighter (by half a stop or more) than the one shown for this
+    // many seconds, the exposure_rate cap lets go and the exposure follows the game (exposure_time). A shaded turn or
+    // trees pass within it and stay capped; a tunnel or a long shade does not (capped, a tunnel stayed 9 stops too
+    // dark). 0: always capped, as in vr7. Replayed (with exposure_down 0.5) on a 2-minute headset log with a tunnel:
+    // swings 0.54 stop in 2 s (the game's own 0.77, flat play 0.45; vr7 0.21), on average 0.24 stop darker than the
+    // game (vr7 0.71), in the tunnel at most 2.8 stops darker (vr7 8.7) and within a stop of it after about 1.5 s.
+    float exposure_gate = 1.5f;
+    // exposure_down: the seconds it takes to darken (exposure_time is for brightening). Out of a tunnel, after the
+    // gate let the exposure follow the game up, 1 s left the road 2.5 stops brighter than the game's for a while;
+    // 0.5 s at most 1.1 stops (on the same log), with swings 0.54 instead of 0.51.
+    float exposure_down = 0.5f;
     float ffr_inner = 35.0f, ffr_outer = 42.0f, ffr_down = 0.8f;
     // hide_target = <hex> ...: draws into a render target at these guest addresses are skipped (the audit's names)
     uint64_t hidden_targets[4]{};
@@ -577,6 +589,8 @@ void ReadSettings() {
         else if (k == "exposure_time" && value >= 0.0f && value <= 10.0f) settings.exposure_time = value;
         else if (k == "exposure_hold" && value >= 0.0f && value <= 90.0f) settings.exposure_hold = value;
         else if (k == "exposure_rate" && value >= 0.0f && value <= 600.0f) settings.exposure_rate = value;
+        else if (k == "exposure_gate" && value >= 0.0f && value <= 60.0f) settings.exposure_gate = value;
+        else if (k == "exposure_down" && value >= 0.0f && value <= 10.0f) settings.exposure_down = value;
         else if (k == "ffr_inner" && value >= 5.0f && value <= 80.0f) settings.ffr_inner = value;
         else if (k == "ffr_outer" && value >= 5.0f && value <= 85.0f) settings.ffr_outer = value;
         else if (k == "ffr_down" && value >= 0.3f && value <= 2.0f) settings.ffr_down = value;
@@ -2824,7 +2838,8 @@ void FilterExposure(float* value) {
     }
     // looking down at the dash or up at the sky: keep the road's exposure
     if (settling || std::fabs(HeadPitch()) < settings.exposure_hold) {
-        const float time = settling ? std::min(settings.exposure_time, 0.5f) : settings.exposure_time;
+        const float time = settling ? std::min(settings.exposure_time, 0.5f)
+                         : measured < held ? settings.exposure_down : settings.exposure_time;
         const float a = time > 0.0f ? 1.0f - std::exp(-dt / time) : 1.0f;
         float next = held + a * (measured - held);
         // exposure_rate: in the car after that, brightening is capped at exposure_rate stops a minute (more in a race
@@ -2836,7 +2851,11 @@ void FilterExposure(float* value) {
         // Replayed on a 31-minute log: >1 stop brighter than the game 18 s (176 s capped both ways), >1 stop darker
         // 158 s (170 s; the shade it does not follow).
         static float recent = 0.0f;
-        if (settings.exposure_rate > 0.0f && since != 0 && !settling) {
+        // exposure_gate: how long the game has wanted it half a stop (0.35 in log luminance) or more brighter
+        static float brighter_for = 0.0f;
+        brighter_for = measured > held + 0.35f ? brighter_for + dt : 0.0f;
+        const bool gate_open = settings.exposure_gate > 0.0f && brighter_for >= settings.exposure_gate;
+        if (settings.exposure_rate > 0.0f && since != 0 && !settling && !gate_open) {
             float hours = 0.0f, compression = 1.0f;
             if (!runtime_scene_debug_time(&hours, &compression) || !std::isfinite(compression)) {
                 compression = 1.0f;
@@ -2858,7 +2877,18 @@ void FilterExposure(float* value) {
 }
 
 bool ExposureLog() {
-    return Active() && settings.exposure_log;
+    // Flat play too (VR off: vr.ini is read here, once), to compare the game's exposure on the monitor with the headset's.
+    static const bool flat = [] {
+        if (Wanted()) {
+            return false;
+        }
+        ReadSettings();
+        if (settings.exposure_log) {
+            std::printf("VR exposure log: on in flat play (vr.ini exposure_log)\n");
+        }
+        return settings.exposure_log;
+    }();
+    return Active() ? settings.exposure_log : flat;
 }
 
 bool JitterLog() {

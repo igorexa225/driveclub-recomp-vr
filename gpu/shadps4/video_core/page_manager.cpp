@@ -19,6 +19,10 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
+// For the exposure log (vr.ini exposure_log): the car's pedals and speed (the mod kit's car state) and the game's camera.
+extern "C" int runtime_mod_car_state(double* values, int max);
+extern "C" int bbgpu_camera(float* out);
+
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -2162,13 +2166,23 @@ PS4_SYSV_ABI bool ExposureExactGet(void* obj, u32 frame, void** out, u32* count)
             BbVr::FilterExposure(v);
             std::memcpy(buf, v, 8);
         }
-        // vr.ini exposure_log = 1: the game's value and the one used, twice a second, with the head's pitch
+        // vr.ini exposure_log = 1: the game's value and the one used, four times a second, with the head's pitch, the
+        // pedals, the speed and the camera's pitch (does the exposure follow braking, the car's nose going down?)
         static std::chrono::steady_clock::time_point last{};
         const auto now = std::chrono::steady_clock::now();
-        if (BbVr::ExposureLog() && now - last > std::chrono::milliseconds(500)) {
+        if (BbVr::ExposureLog() && now - last > std::chrono::milliseconds(250)) {
             last = now;
-            std::printf("VR exposure: %.5g %.5g -> %.5g %.5g (%c), head pitch %+.0f\n", game[0], game[1], v[0], v[1],
-                        path, BbVr::HeadPitch());
+            double car[32]{};
+            const bool have_car = runtime_mod_car_state(car, 32) >= 7;
+            float cam[45]{};
+            const bool have_cam = bbgpu_camera(cam) == 45;
+            // the view block's rows are the camera's axes in the world: the third one's height is the view's pitch
+            const float view_pitch = have_cam ? std::asin(std::clamp(cam[9], -1.0f, 1.0f)) * 57.29578f : 0.0f;
+            std::printf("VR exposure: %.5g %.5g -> %.5g %.5g (%c), head pitch %+.0f, brake %.2f throttle %.2f, "
+                        "%.0f km/h, view pitch %+.2f%s\n",
+                        game[0], game[1], v[0], v[1], path, BbVr::HeadPitch(), have_car ? car[6] : 0.0,
+                        have_car ? car[5] : 0.0, have_car ? car[0] * 3.6 : 0.0, view_pitch,
+                        have_cam ? "" : " (no camera)");
             std::fflush(stdout);
         }
     }
