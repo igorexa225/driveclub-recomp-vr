@@ -202,8 +202,7 @@ struct Settings {
     // glow = <percent>: the game's glow (its bloom, a blurred copy of the picture added over it) in true stereo, 100 as
     // the game draws it (GlowScale; BB_VR_GLOW, Shift and the \ key)
     int glow = 100;
-    // exposure_log = 1: the game's auto-exposure value four times a second with the head's pitch, the pedals, the speed
-    // and the camera's pitch, in flat play too (ExposureLog)
+    // exposure_log = 1: the game's auto-exposure value four times a second with the head's pitch, in flat play too
     bool exposure_log = false;
     bool jitter_log = false; // JitterLog
     // pose_log = 1 (development): the moments a frame may be stated to the headset with another turn than it was drawn
