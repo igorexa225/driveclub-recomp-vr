@@ -33,6 +33,7 @@
 //                        smooth_turn = 0.05 and smooth_move = 0.1 (how fast it lets go, per degree/s and per cm/s)
 //   frame_pose = 1       each frame is stated to the headset with the turn it was really drawn with (the game turns
 //                        the camera up to a few degrees after the hook: its view-projection's axes); 0: the hook's
+//   frame_pose_max = 45  frame_pose states a turn after the hook up to this many degrees (a fast nod: 10-23)
 //   cockpit_vfov = 90    the driver's head camera's vertical field of view in the headset, degrees (VR sets the
 //                        game's field of view for it while on: SetFieldOfView; F5/F6 do not apply then)
 //   screen_vfov = 40     the height of the still screen, degrees
@@ -84,6 +85,7 @@ void SetShift(float shift);
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -175,6 +177,11 @@ struct Settings {
     bool draw_trace = false;
     // the head pose stated for a frame takes the turn the game gave the camera after the hook (frame_pose)
     bool frame_pose = true;
+    // frame_pose_max: a turn after the hook up to this many degrees is stated. The game draws a frame with the camera of
+    // a moment before the hook's (at 30-60 FPS 1-4 degrees behind a still head), so a fast nod (150-300 degrees/s)
+    // left the frame 10-23 degrees behind: with the old 10 such frames were stated at the hook's turn and the
+    // picture jumped up and down by that much.
+    float frame_pose_max = 45.0f;
     uint64_t hidden[16]{};
     // dump_each = 1: hide_shader's list is not hidden in play; the = key saves one frame as it is and then one frame
     // with each of them hidden alone (EyeDump, DumpHide)
@@ -199,6 +206,10 @@ struct Settings {
     // and the camera's pitch, in flat play too (ExposureLog)
     bool exposure_log = false;
     bool jitter_log = false; // JitterLog
+    // pose_log = 1 (development): the moments a frame may be stated to the headset with another turn than it was drawn
+    // with (a camera jump after the hook, a frame without its camera, the head smoothing starting over), with the
+    // head's speed and pitch then, and each second the head turns fast (PoseLog)
+    bool pose_log = false;
     // dev_keys = 1 (or draw_trace): the keys for comparing and saving pictures (7, 8, 9, - ` . , / ' \ ; =). Without it
     // only recentring, the seat and the exposure ([ ]) answer: the rest of the keyboard is the game's.
     bool dev_keys = false;
@@ -583,6 +594,7 @@ void ReadSettings() {
         else if (k == "glow" && value >= 0.0f && value <= 100.0f) settings.glow = int(value + 0.5f);
         else if (k == "exposure_log") settings.exposure_log = value != 0;
         else if (k == "jitter_log") settings.jitter_log = value != 0;
+        else if (k == "pose_log") settings.pose_log = value != 0;
         else if (k == "dev_keys") settings.dev_keys = value != 0;
         else if (k == "exposure_filter") settings.exposure_filter = value != 0;
         else if (k == "exposure_bias" && value >= -4.0f && value <= 4.0f) settings.exposure_bias = value;
@@ -595,6 +607,7 @@ void ReadSettings() {
         else if (k == "ffr_outer" && value >= 5.0f && value <= 85.0f) settings.ffr_outer = value;
         else if (k == "ffr_down" && value >= 0.3f && value <= 2.0f) settings.ffr_down = value;
         else if (k == "frame_pose") settings.frame_pose = value != 0;
+        else if (k == "frame_pose_max" && value >= 0.0f && value <= 180.0f) settings.frame_pose_max = value;
         else if (k == "ipd" && value > 0.0f && value < 0.2f) settings.ipd = value, settings.ipd_set = true;
         else if (k == "runtime_fov") settings.runtime_fov = value != 0;
         else if (k == "resample") settings.resample = value != 0;
@@ -760,6 +773,32 @@ float AngleDeg(const XrQuaternionf& a, const XrQuaternionf& b) {
     const float d = std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
     return 2.0f * std::acos(std::fmin(1.0f, d)) * 180.0f / Pi;
 }
+// pose_log: the head's turning speed (degrees/s) and pitch as the last frame was stated
+std::atomic<float> pose_log_speed{0.0f}, pose_log_pitch{0.0f};
+void PoseLog(const char* format, ...) {
+    if (!settings.pose_log) {
+        return;
+    }
+    // at most 20 lines a second
+    static std::atomic<long long> window_us{0};
+    static std::atomic<int> lines{0};
+    const long long now = NowUs();
+    if (now - window_us.load() > 1000000) {
+        window_us.store(now);
+        lines.store(0);
+    }
+    if (lines.fetch_add(1) >= 20) {
+        return;
+    }
+    char text[320];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    std::printf("VR pose %.2f s: %s (head %.0f deg/s, pitch %+.0f)\n", double(now % 100000000000LL) / 1e6, text,
+                pose_log_speed.load(), pose_log_pitch.load());
+    std::fflush(stdout);
+}
 XrQuaternionf Nlerp(XrQuaternionf a, XrQuaternionf b, float t) {
     if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0f) {
         b = {-b.x, -b.y, -b.z, -b.w};
@@ -902,6 +941,10 @@ XrPosef Steady(const XrPosef& raw) {
     HeadFilter& f = head_filter;
     const long long now = NowUs();
     if (!settings.smoothing || !f.init || now - f.time_us > 200000) {
+        if (settings.smoothing && f.init) {
+            PoseLog("the head smoothing starts over after %.0f ms, %.1f degrees behind the head",
+                    double(now - f.time_us) / 1000.0, AngleDeg(f.pose.orientation, raw.orientation));
+        }
         f = {true, now, raw, 0.0f, 0.0f};
         return raw;
     }
@@ -2726,12 +2769,17 @@ void NoteCameraConstants(const float* data) {
                 const float n = std::sqrt(t.x * t.x + t.y * t.y + t.z * t.z + t.w * t.w);
                 t = {t.x / n, t.y / n, t.z / n, t.w / n};
                 frame_deg = 2.0f * std::acos(std::fmin(1.0f, std::fabs(t.w))) * 180.0f / Pi;
-                if (frame_deg < 10.0f) {
+                const bool within = frame_deg < settings.frame_pose_max;
+                if (within) {
                     view_in_car(b[0], camera_now.view);
                 }
-                if (settings.frame_pose && frame_deg < 10.0f) {
+                if (settings.frame_pose && within) {
                     const Quat h = Mul(ToQuat(camera_now.head.orientation), t);
                     camera_now.head.orientation = {h.x, h.y, h.z, h.w};
+                }
+                if (frame_deg >= 3.0f) {
+                    PoseLog("the game turned the camera %.1f degrees after the hook (%s)", frame_deg,
+                            within ? "stated" : "NOT stated: over frame_pose_max");
                 }
             }
         }
@@ -4182,6 +4230,26 @@ void AfterSubmit() {
                 pose = st.frame_pose; // the head this frame was drawn for
             } else if (!HeadAt(NowUs() - (long long)(settings.latency_ms * 1000.0f), pose)) {
                 pose = head_now;
+            }
+            if (settings.pose_log) {
+                // the head's speed between stated frames; a frame without its camera; a fast turn once a second
+                static XrQuaternionf last{};
+                static long long last_us = 0, fast_us = 0;
+                const long long now = NowUs();
+                const XrQuaternionf q = head_now.orientation;
+                if (last_us && now > last_us) {
+                    pose_log_speed.store(AngleDeg(last, q) / (float(now - last_us) / 1e6f));
+                }
+                last = q, last_us = now;
+                const XrVector3f fwd = Rotate(ToQuat(q), {0.0f, 0.0f, -1.0f});
+                pose_log_pitch.store(std::asin(std::clamp(fwd.y, -1.0f, 1.0f)) * 180.0f / Pi);
+                if (!st.frame_tagged) {
+                    PoseLog("a frame without its camera: the head of %.0f ms ago stated", double(settings.latency_ms));
+                } else if (pose_log_speed.load() > 100.0f && now - fast_us > 1000000) {
+                    fast_us = now;
+                    PoseLog("the head turns fast; this frame stated %.1f degrees from the head now",
+                            AngleDeg(pose.orientation, q));
+                }
             }
         } else {
             // a still screen straight ahead of the recentred head
