@@ -168,6 +168,13 @@ struct Settings {
     // size it asks for), resampled here (Lanczos, linear light): the runtime shows it pixel for pixel. 0: the drawn
     // picture's part the runtime sees, which it stretches itself (19% at a 5 degree edge margin). The / key.
     bool resample = true;
+    // resample_kernel = 0 to 4: what the resample does when the scene has more pixels than the headset's picture (the
+    // Headset picture scale above 100). 0: nothing, the runtime gets the drawn pixels of its angles as they are and
+    // takes them to the headset itself, as other games' supersampling does (the sharpest: in SteamVR any filter of ours
+    // before the runtime's own lost detail, 2026-11-10). 1 to 4, our filter down to the runtime's size: 1 Lanczos 2
+    // widened by all of the supersampling (the softest, vr9), 2 Lanczos 3 widened by all of it, 3 Lanczos 3 widened by
+    // half of it, 4 Lanczos 3 not widened. Shift and the / key go through them (ResampleKernel).
+    int resample_kernel = 0;
     // half_rate = 1: the game's frame limit is half the headset's rate (FrameLimitHz; the , key)
     bool half_rate = false;
     bool ipd_set = false; // ipd given in vr.ini
@@ -304,6 +311,7 @@ std::atomic<bool> hud_layer_off{false};    // the ` key: the HUD's own layer lef
 constexpr int kHeadsetSeries = 8;     // the . key: frames saved
 std::atomic<int> headset_shot{0};       // the . key: frames still to save (the first: both eyes as PNGs)
 std::atomic<bool> resample_key_off{false}; // the / key: the runtime's own stretch, to compare
+std::atomic<int> resample_kernel_key{-1};   // Shift and the / key: the resample's filter (-1: as vr.ini says)
 std::atomic<int> half_rate_key{-1};         // the , key: half the headset's rate on (1) or off (0); -1 vr.ini's
 std::atomic<bool> ffr_key_off{false};  // the ' key: foveated rendering off to compare (FfrOn)
 std::atomic<long long> cockpit_since_us{0}; // when the in-car view began (0: not in it), for exposure_rate
@@ -610,6 +618,7 @@ void ReadSettings() {
         else if (k == "ipd" && value > 0.0f && value < 0.2f) settings.ipd = value, settings.ipd_set = true;
         else if (k == "runtime_fov") settings.runtime_fov = value != 0;
         else if (k == "resample") settings.resample = value != 0;
+        else if (k == "resample_kernel" && value >= 0 && value <= 4) settings.resample_kernel = int(value);
         else if (k == "half_rate") settings.half_rate = value != 0;
         else if (k == "seat_x") settings.seat[0] = value;
         else if (k == "seat_y") settings.seat[1] = value;
@@ -1912,7 +1921,20 @@ struct ResamplePush {
     float offset[2]; // the scene position of the left top corner
     float encode;
     float power, contrast, brightness;
+    float lobes, widen; // the kernel (ResampleKernel)
 };
+
+// The resample's filter: Lanczos lobes and how much of the supersampling widens it (vr.ini resample_kernel)
+int ResampleKernel() {
+    const int key = resample_kernel_key.load(std::memory_order_relaxed);
+    return key >= 0 ? key : settings.resample_kernel;
+}
+constexpr int kKernels = 5;
+constexpr float kKernelLobes[kKernels] = {1.0f, 2.0f, 3.0f, 3.0f, 3.0f};
+constexpr float kKernelWiden[kKernels] = {0.0f, 1.0f, 1.0f, 0.5f, 0.0f};
+constexpr const char* kKernelName[kKernels] = {
+    "none, the drawn pixels go to the runtime as they are", "Lanczos 2, widened (the softest, vr9)",
+    "Lanczos 3, widened", "Lanczos 3, widened by half", "Lanczos 3, not widened"};
 
 struct WindowPush {
     float size[2];
@@ -2342,8 +2364,19 @@ void ReadKeys() {
     was_half = half_down;
     // The / key: the resample to the runtime's angles off and on (to compare)
     static bool was_resample = false;
-    const bool resample_down = dev && settings.resample && BbVr::Active() &&
-                               (GetAsyncKeyState(VK_OEM_2) & 0x8000) != 0;
+    const bool slash = dev && settings.resample && BbVr::Active() && (GetAsyncKeyState(VK_OEM_2) & 0x8000) != 0;
+    const bool slash_shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool resample_down = slash && !slash_shift;
+    // Shift and the / key: the resample's next filter
+    static bool was_kernel = false;
+    const bool kernel_down = slash && slash_shift;
+    if (kernel_down && !was_kernel) {
+        const int next = (ResampleKernel() + 1) % kKernels;
+        resample_kernel_key = next;
+        std::printf("VR: the resample's filter %d: %s (Shift and the / key)\n", next, kKernelName[next]);
+        std::fflush(stdout);
+    }
+    was_kernel = kernel_down;
     if (resample_down && !was_resample) {
         const bool off = !resample_key_off.load();
         resample_key_off = off;
@@ -3561,8 +3594,12 @@ bool ResampledPicture(VkCommandBuffer cmd, VkImageView scene_view, GpuImage& out
     const float shown_w = float(width) * (r - l) / (2.0f * sx), shown_h = float(height) * (u - d) / (2.0f * sy);
     float scale_x = shown_w / float(w), scale_y = shown_h / float(h);
     float offset_x = (l + sx) / (2.0f * sx) * float(width), offset_y = (sy - u) / (2.0f * sy) * float(height);
-    // drawn at the runtime's pixels per degree (the Auto headset picture): its own pixels as they are, at their angles
-    const bool whole = std::fabs(scale_x - 1.0f) < 0.01f && std::fabs(scale_y - 1.0f) < 0.01f;
+    // drawn at the runtime's pixels per degree (the Auto headset picture): its own pixels as they are, at their angles.
+    // Supersampled (more pixels than the runtime's) the same, unless vr.ini resample_kernel asks for our filter: the
+    // runtime takes the big picture to the headset in one step, as with other games
+    const bool supersampled = scale_x > 1.01f && scale_y > 1.01f && ResampleKernel() == 0;
+    const bool whole = supersampled || (std::fabs(scale_x - 1.0f) < 0.01f && std::fabs(scale_y - 1.0f) < 0.01f);
+    const float scale_x_drawn = scale_x, scale_y_drawn = scale_y;
     if (whole) {
         const int32_t x0 = std::clamp(int32_t(std::lround(offset_x)), 0, int32_t(width) - 64);
         const int32_t y0 = std::clamp(int32_t(std::lround(offset_y)), 0, int32_t(height) - 64);
@@ -3578,10 +3615,15 @@ bool ResampledPicture(VkCommandBuffer cmd, VkImageView scene_view, GpuImage& out
     if (!MakeImage(out, w, h, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         return false;
     }
-    static uint32_t logged[4]{};
-    if (logged[0] != w || logged[1] != h || logged[2] != width || logged[3] != height) {
-        logged[0] = w, logged[1] = h, logged[2] = width, logged[3] = height;
-        if (whole) {
+    static uint32_t logged[5]{};
+    if (logged[0] != w || logged[1] != h || logged[2] != width || logged[3] != height || logged[4] != uint32_t(whole)) {
+        logged[0] = w, logged[1] = h, logged[2] = width, logged[3] = height, logged[4] = uint32_t(whole);
+        if (supersampled) {
+            std::printf("VR: each eye goes to the runtime at %ux%u, the drawn pixels of its angles as they are (the "
+                        "drawn %ux%u, supersampled %.2fx across, %.2fx down: the runtime brings it to the headset; "
+                        "resample, the / key; Shift and / our filters)\n",
+                        w, h, width, height, scale_x_drawn, scale_y_drawn);
+        } else if (whole) {
             std::printf("VR: each eye goes to the runtime at %ux%u, pixel for pixel (the drawn %ux%u has the runtime's "
                         "own pixels per degree; resample, the / key)\n",
                         w, h, width, height);
@@ -3612,6 +3654,8 @@ bool ResampledPicture(VkCommandBuffer cmd, VkImageView scene_view, GpuImage& out
     push.offset[0] = offset_x, push.offset[1] = offset_y;
     push.encode = encode ? 1.0f : 0.0f;
     push.power = 1.0f, push.contrast = 1.0f, push.brightness = 0.0f;
+    const int kernel = std::clamp(ResampleKernel(), 1, kKernels - 1); // 0 never resamples (whole above)
+    push.lobes = kKernelLobes[kernel], push.widen = kKernelWiden[kernel];
     VKF.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gpu.resample_pipeline);
     VKF.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gpu.resample_layout, 0, 2, writes);
     VKF.vkCmdPushConstants(cmd, gpu.resample_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, &push);

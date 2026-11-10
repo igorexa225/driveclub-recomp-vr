@@ -26,9 +26,10 @@ DriveClub 1.28.
    - *Headset picture scale*: each eye is drawn at the size your headset's app asks for (Virtual Desktop's quality,
      SteamVR's resolution), in the shape of that headset's eye, so the headset gets it pixel for pixel. The first
      start with a new headset learns its eyes (`data\user\vr_eyes.ini`), the next ones draw the exact size.
-     100% is what the headset gets. Above it the eyes are drawn bigger and brought down to
-     the headset's size: cleaner edges and distant detail, for about a fifth more work at 110%, half more at 125%.
-     Below it: more FPS, softer;
+     100% is what the headset gets. Above it the eyes are drawn bigger and go to the headset's app as drawn; it
+     brings them down to the headset itself, as with other games' supersampling: cleaner edges and sharper distant
+     detail, for about a fifth more work at 110%, half more at 125%, and more video memory. Below it: more FPS,
+     softer (the game stretches it to the headset's size itself, sharper than the headset's app does);
    - *Head smoothing in VR*: see *Picture* below.
 
 While VR is on the launcher hides and sets what would break VR: *Output* and *Render resolution*, *Aspect ratio*,
@@ -137,7 +138,9 @@ seat_x = 0         # the eyes relative to the driver's eyes the game sets for ea
                    # x left, y up, z forward (seat_y, seat_z); data\user\vr_seat.ini (the seat keys) wins
 runtime_fov = 1    # each eye drawn with the field of view and eye distance the runtime gives it (drawn symmetric,
                    # the headset gets just its own part); 0: cockpit_vfov
-resample = 1       # each eye brought to the runtime's exact size and angles (Lanczos), so it is shown pixel for pixel
+resample = 1       # each eye cut to the runtime's angles and, below 100%, stretched to its size (Lanczos), so it is
+                   # shown pixel for pixel; above 100% the drawn pixels go as they are (resample_kernel = 1 to 4:
+                   # our filter down to the runtime's size instead, 1 as vr9; it loses detail)
 frame_pose = 1     # each frame stated to the headset with the turn it was really drawn with; 0: the hook's
 auto_recentre = 1  # recentre on getting into the car (race start, restart, another car); 0: only by the key
 cockpit_vfov = 90  # the cockpit camera's vertical field of view in the headset, degrees
@@ -166,8 +169,11 @@ key_recentre = 0   # and key_up = 2, key_down = 1, key_left = 5, key_right = 6, 
   to both eyes at once with its clip x moved by the eye's offset. The passes that build per-eye data (fog, shadows,
   the tiled lights, the glow, the game's motion vectors) run for each eye. DLSS runs twice a frame, on each eye's
   layers.
-- Each eye is drawn with a symmetric projection that covers the runtime's angles, then resampled to exactly what the
-  runtime asks for, so the headset shows it pixel for pixel.
+- Each eye is drawn with a symmetric projection that covers the runtime's angles; the runtime gets the part of its
+  own angles. At the runtime's size or below, it is resampled to exactly what the runtime asks for, so the headset
+  shows it pixel for pixel. Above it (supersampling) the drawn pixels go as they are, and the runtime takes them to
+  the headset in one step: our own filter down to its size before that was a second step, and in SteamVR it lost
+  detail at any setting.
 - Each frame is matched with the hook call it was drawn from (the camera position in the G-buffer pass's constants),
   so it is stated to the headset at exactly the pose it was drawn from; the runtime turns it to the head's pose at
   display time.

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // VR, true stereo: an eye's picture for the headset at the runtime's own angles and pixels per degree, from the eye's
 // scene (drawn wider, with a symmetric field of view, at the launcher's size). The runtime then shows it pixel for
-// pixel instead of stretching a cropped part of it with its own filter. Lanczos 2 in linear light, widened when the
-// scene has more pixels than the headset (supersampling), then stored as vr_copy.comp does.
+// pixel instead of stretching a cropped part of it with its own filter. Lanczos in linear light, widened when the
+// scene has more pixels than the headset (supersampling; lobes and widening: ResampleKernel), then stored as vr_copy.comp does.
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -20,6 +20,8 @@ layout(push_constant) uniform Constants {
     float power;
     float contrast;
     float brightness;
+    float lobes;     // the Lanczos kernel's lobes (2 or 3)
+    float widen;     // how much of the supersampling widens the kernel (1: all of it, a clean downscale; 0: none)
 };
 
 vec3 Adjust(vec3 e) {
@@ -29,16 +31,16 @@ vec3 Adjust(vec3 e) {
 
 const float kPi = 3.14159265;
 
-float Lanczos2(float x) {
+float Lanczos(float x, float a) {
     x = abs(x);
     if (x < 1e-4) {
         return 1.0;
     }
-    if (x >= 2.0) {
+    if (x >= a) {
         return 0.0;
     }
     const float px = kPi * x;
-    return 2.0 * sin(px) * sin(px * 0.5) / (px * px);
+    return a * sin(px) * sin(px / a) / (px * px);
 }
 
 void main() {
@@ -48,21 +50,23 @@ void main() {
     }
     // where this pixel's centre falls in the scene, in scene pixels
     const vec2 at = offset + (vec2(pixel) + 0.5) * scale;
-    // the kernel covers 2 of this picture's pixels each side (more scene pixels when the scene is bigger)
-    const vec2 stretch = max(scale, vec2(1.0));
-    const vec2 radius = 2.0 * stretch;
+    // the kernel covers `lobes` of this picture's pixels each side (more scene pixels when the scene is bigger, by
+    // `widen` of the supersampling)
+    const float a = lobes;
+    const vec2 stretch = vec2(1.0) + (max(scale, vec2(1.0)) - vec2(1.0)) * widen;
+    const vec2 radius = a * stretch;
     const ivec2 first = ivec2(floor(at - radius + 0.5));
     const ivec2 last = ivec2(floor(at + radius - 0.5));
     const ivec2 top = ivec2(scene_size) - 1;
     vec3 sum = vec3(0.0);
     float total = 0.0;
     for (int y = first.y; y <= last.y; ++y) {
-        const float wy = Lanczos2((float(y) + 0.5 - at.y) / stretch.y);
+        const float wy = Lanczos((float(y) + 0.5 - at.y) / stretch.y, a);
         if (wy == 0.0) {
             continue;
         }
         for (int x = first.x; x <= last.x; ++x) {
-            const float w = wy * Lanczos2((float(x) + 0.5 - at.x) / stretch.x);
+            const float w = wy * Lanczos((float(x) + 0.5 - at.x) / stretch.x, a);
             if (w == 0.0) {
                 continue;
             }
