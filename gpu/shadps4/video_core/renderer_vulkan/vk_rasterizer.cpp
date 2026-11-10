@@ -546,11 +546,11 @@ void Rasterizer::EliminateFastClear() {
     VideoCore::TextureCache::ImageDesc desc(col_buf, CbExtent(0));
     const auto image_id = texture_cache.FindImage(desc);
     const auto& image_view = texture_cache.FindRenderTarget(image_id, desc);
-    if (!texture_cache.IsMetaCleared(col_buf.CmaskAddress(), col_buf.view.slice_start)) {
+    if (!texture_cache.IsColorMetaCleared(col_buf.CmaskAddress(), col_buf.view.slice_start)) {
         return;
     }
     for (u32 slice = col_buf.view.slice_start; slice <= col_buf.view.slice_max; ++slice) {
-        texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
+        texture_cache.TouchColorMeta(col_buf.CmaskAddress(), slice);
     }
     auto& image = texture_cache.GetImage(image_id);
     const auto clear_value = LiverpoolToVK::ColorBufferClearValue(col_buf);
@@ -4803,8 +4803,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto mip = image_view.info.range.base.level;
 
         const auto& col_buf = regs.color_buffers[cb];
-        const bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
-        texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
+        const bool is_clear = texture_cache.IsColorMetaCleared(col_buf.CmaskAddress(), slice);
+        texture_cache.TouchColorMeta(col_buf.CmaskAddress(), slice);
 
         if (reduced) {
             // The native image is resolved lazily when a shader/copy actually reads it.
