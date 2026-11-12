@@ -112,6 +112,7 @@ void main() {
     if (encode > 0.5) {
         color.rgb = Encode(color.rgb);
     }
+    color.a = 1.0; // the picture is opaque (its part shown is copied to the runtime as it is)
     imageStore(out_img, pixel, color);
 #endif
 }

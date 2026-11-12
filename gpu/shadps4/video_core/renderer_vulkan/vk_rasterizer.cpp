@@ -5043,6 +5043,20 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             if (geometry) {
                 state.shading_rate_view = Vr::Foveation::Prepare(instance, scheduler, state.width, state.height);
             }
+        }
+        // BB_VR_FFR_EXTRA (the launcher's "Foveated reflections and occlusion", vr.ini ffr_extra = 1): the
+        // reflection trace (full size, no depth) and the ambient occlusion (half size) at the eye's rates too. They
+        // follow the G-buffer in the frame; measured on a Quest 2 at 100%: 56.3 -> 58.4 FPS, not seen in the headset.
+        static const bool ffr_extra = std::getenv("BB_VR_FFR_EXTRA") != nullptr;
+        if (ffr_extra && vr_ffr_scene && !state.shading_rate_view) {
+            const Shader::Info* extra_fs = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+            const u64 extra_ps = extra_fs ? extra_fs->pgm_hash : 0;
+            if (extra_ps == 0x558fbbd4ull || extra_ps == 0xbf511478ull) {
+                state.shading_rate_view = Vr::Foveation::Prepare(instance, scheduler, state.width, state.height);
+            }
+        }
+        if (render_size && vr_ffr_scene) {
+            const bool geometry = bool(db_desc.first);
             static std::mutex seen_mutex;
             static std::vector<std::pair<u64, u64>> seen;
             const u64 vs = pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash;

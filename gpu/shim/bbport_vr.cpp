@@ -168,6 +168,7 @@ struct Settings {
     // size it asks for), resampled here (Lanczos, linear light): the runtime shows it pixel for pixel. 0: the drawn
     // picture's part the runtime sees, which it stretches itself (19% at a 5 degree edge margin). The / key.
     bool resample = true;
+    bool eye_copy = true; // pixel for pixel: the SMAA result's part shown is copied, no shader pass (0: the shader)
     // resample_kernel = 0 to 4: what the resample does when the scene has more pixels than the headset's picture (the
     // Headset picture scale above 100). 0: nothing, the runtime gets the drawn pixels of its angles as they are and
     // takes them to the headset itself, as other games' supersampling does (the sharpest: in SteamVR any filter of ours
@@ -592,6 +593,9 @@ void ReadSettings() {
         else if (k == "audit" && value != 0) _putenv("BB_VR_AUDIT=1");
         // gpu_profile = 1: the GPU time of each pass in the log (BB_GPU_PROFILE; the diagnostics build only)
         else if (k == "gpu_profile" && value != 0) _putenv("BB_GPU_PROFILE=1");
+        // ffr_extra = 1: foveated rendering also for the reflection trace and the ambient occlusion (the launcher's
+        // "Foveated reflections and occlusion" sets it as well)
+        else if (k == "ffr_extra" && value != 0) _putenv("BB_VR_FFR_EXTRA=1");
         else if (k == "dump_each") settings.dump_each = value != 0;
         else if (k == "game_taa") settings.game_taa = value != 0;
         else if (k == "edge_margin" && value >= 0.0f && value <= 10.0f) settings.edge_margin = value;
@@ -618,6 +622,7 @@ void ReadSettings() {
         else if (k == "ipd" && value > 0.0f && value < 0.2f) settings.ipd = value, settings.ipd_set = true;
         else if (k == "runtime_fov") settings.runtime_fov = value != 0;
         else if (k == "resample") settings.resample = value != 0;
+        else if (k == "eye_copy") settings.eye_copy = value != 0;
         else if (k == "resample_kernel" && value >= 0 && value <= 4) settings.resample_kernel = int(value);
         else if (k == "half_rate") settings.half_rate = value != 0;
         else if (k == "seat_x") settings.seat[0] = value;
@@ -3152,9 +3157,9 @@ void TakeScene(VkCommandBuffer cmd, VkImage display, VkFormat format, uint32_t w
     VKF.vkCmdClearColorImage(cmd, display, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
     Barrier(cmd, display, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
-    // the frame's scene depth, for the other eye (reproject)
+    // the frame's scene depth, for the other eye (reproject); not when both eyes are drawn (true stereo reads none)
     gpu.depth_ok[index] = false;
-    if (depth && reproject_mode.load() != 0 && depth_width == width && depth_height == height &&
+    if (depth && reproject_mode.load() != 0 && !gpu.right_ok[index] && depth_width == width && depth_height == height &&
         (depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT || depth_format == VK_FORMAT_D32_SFLOAT) &&
         MakeDepth(gpu.depths[index], width, height, depth_format)) {
         // `depth` is in TRANSFER_SRC_OPTIMAL and stays so
@@ -3503,7 +3508,7 @@ VkImageView SmaaPicture(VkCommandBuffer cmd, VkImageView scene_view, bool encode
     if (!SmaaOn() || !SmaaTables(cmd)) {
         return VK_NULL_HANDLE;
     }
-    constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     GpuImage& out = gpu.smaa_out[eye];
     if (!MakeImage(gpu.smaa_edges, width, height, usage) || !MakeImage(gpu.smaa_weights, width, height, usage) ||
         !MakeImage(out, width, height, usage, VK_FORMAT_R8G8B8A8_UNORM, true)) {
@@ -3566,7 +3571,7 @@ VkImageView SmaaPicture(VkCommandBuffer cmd, VkImageView scene_view, bool encode
 }
 
 bool ResampledPicture(VkCommandBuffer cmd, VkImageView scene_view, GpuImage& out, bool encode, uint32_t width,
-                      uint32_t height, int eye, XrFovf& fov) {
+                      uint32_t height, int eye, XrFovf& fov, const GpuImage* direct = nullptr) {
     if (!settings.resample || resample_key_off.load() || !gpu.resample_pipeline || !settings.runtime_fov ||
         !runtime_eye_known.load() || !st.recommended_width || !st.recommended_height) {
         return false;
@@ -3612,7 +3617,7 @@ bool ResampledPicture(VkCommandBuffer cmd, VkImageView scene_view, GpuImage& out
         scale_x = scale_y = 1.0f;
         offset_x = float(x0), offset_y = float(y0);
     }
-    if (!MakeImage(out, w, h, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+    if (!MakeImage(out, w, h, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         return false;
     }
     static uint32_t logged[5]{};
@@ -3634,6 +3639,27 @@ bool ResampledPicture(VkCommandBuffer cmd, VkImageView scene_view, GpuImage& out
                         shown_w / float(w), shown_h / float(h));
         }
         std::fflush(stdout);
+    }
+    // Pixel for pixel from an RGBA8 picture (the SMAA result, alpha 1, SHADER_READ_ONLY_OPTIMAL, left so):
+    // its bytes are the picture already, so the part shown is copied, no shader pass (vr.ini eye_copy = 0: the shader)
+    if (whole && direct && direct->image && settings.eye_copy && direct->width == width && direct->height == height &&
+        (direct->format == VK_FORMAT_R8G8B8A8_UNORM || direct->format == VK_FORMAT_R8G8B8A8_SRGB)) {
+        Barrier(cmd, direct->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        Barrier(cmd, out.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkImageCopy region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.srcOffset = {int32_t(std::lround(offset_x)), int32_t(std::lround(offset_y)), 0};
+        region.extent = {w, h, 1};
+        VKF.vkCmdCopyImage(cmd, direct->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, out.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        Barrier(cmd, out.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        Barrier(cmd, direct->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+        return true;
     }
     Barrier(cmd, out.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_READ_BIT,
             VK_ACCESS_SHADER_WRITE_BIT);
@@ -3796,6 +3822,7 @@ VkImageView NoteFrame(VkCommandBuffer cmd, VkImage frame, VkImageView display_vi
                 // multiview: the left eye's scene (layer 0) and the right eye's (layer 1), both drawn this frame
                 VkImageView left_view = scene_view;
                 VkImageView right_view = SampleView(gpu.scenes_right[scene_index], display_format);
+                bool smaa_done = false; // the eyes' views are the SMAA results (gpu.smaa_out)
                 if (right_view && SmaaOn()) {
                     // SMAA on each eye's scene first (the HUD is apart): the eyes are then made from its result
                     const VkImageView left_smaa =
@@ -3805,14 +3832,15 @@ VkImageView NoteFrame(VkCommandBuffer cmd, VkImage frame, VkImageView display_vi
                                   : VK_NULL_HANDLE;
                     if (left_smaa && right_smaa) {
                         left_view = left_smaa, right_view = right_smaa;
+                        smaa_done = true;
                     }
                 }
                 entry->resampled =
                     right_view &&
                     ResampledPicture(cmd, left_view, entry->other, encode, display_width, display_height, 0,
-                                     entry->fov[0]) &&
+                                     entry->fov[0], smaa_done ? &gpu.smaa_out[0] : nullptr) &&
                     ResampledPicture(cmd, right_view, entry->right, encode, display_width, display_height, 1,
-                                     entry->fov[1]);
+                                     entry->fov[1], smaa_done ? &gpu.smaa_out[1] : nullptr);
                 entry->both = right_view && (entry->resampled ||
                                              (ScenePicture(cmd, left_view, entry->other, encode, display_width,
                                                            display_height) &&

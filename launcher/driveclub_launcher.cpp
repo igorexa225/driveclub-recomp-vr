@@ -204,6 +204,8 @@ int g_vr_exposure = 2;      // "Exposure in VR" (vr_exposure= in launcher.ini): 
 int g_vr_smooth = 1;        // "Head smoothing in VR" (vr_smooth=): 0 off, 1 light, 2 strong (BB_VR_SMOOTHING)
 int g_vr_smooth_row = -1;
 int g_vr_ffr_row = -1, g_vr_edge_row = -1, g_vr_stereo_row = -1, g_vr_exposure_row = -1;
+int g_vr_ffr_extra = 0;     // "Foveated reflections and occlusion" (vr_ffr_extra=): 0 off, 1 on (BB_VR_FFR_EXTRA)
+int g_vr_ffr_extra_row = -1;
 bool g_two_thread = true;       // "Two-thread rendering" (draw_threads= in launcher.ini; off by default on AMD)
 bool g_check_updates = true;  // "Check for new versions" (check_updates= in launcher.ini)
 // A VR build: the official releases have no VR, so it neither offers them nor shows the switch.
@@ -430,8 +432,8 @@ int g_inres = -1, g_wide = -1, g_aspect = -1, g_outres = -1, g_preset = -1, g_mi
 
 // Graphics detail rows (graphics.cpp): the control of each, and its choice from launcher.ini (-1 = not saved yet).
 enum GfxRow { kGfxCar, kGfxOpp, kGfxScenery, kGfxSsr, kGfxShadows, kGfxParticles, kGfxDynres, kGfxBlur, kGfxDust,
-              kGfxHaze, kGfxFxaa, kGfxRows };
-int g_gfx[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+              kGfxHaze, kGfxFxaa, kGfxSsrOn, kGfxSsao, kGfxRows };
+int g_gfx[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 int g_motion_blur = -1;
 int g_prompts = -1, g_xbox_buttons = -1, g_ps_buttons = -1;
 int prompts_saved = 0, xbox_buttons_saved = 0, ps_buttons_saved = 0;
@@ -453,10 +455,10 @@ const wchar_t* MotionBlurReference() {
 HWND g_motion_blur_tooltip = nullptr;
 
 int g_blur_patch = -1;  // the "Disable motion blur and depth of field" patch row
-int gfx_saved[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+int gfx_saved[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 const char* const kGfxKey[kGfxRows] = {"gfx_car=", "gfx_opponents=", "gfx_scenery=", "gfx_reflections=", "gfx_shadows=",
                                        "gfx_particles=", "gfx_dynres=", "gfx_motion_blur=", "gfx_lens_dust=",
-                                       "gfx_heat_haze=", "gfx_fxaa="};
+                                       "gfx_heat_haze=", "gfx_fxaa=", "gfx_ssr=", "gfx_ssao="};
 int unlocked_saved = 0;  // "Unlocked" frame rate choice, from launcher.ini: 1 VRR, 2 no V-Sync  // indices of the render resolution and widescreen choices
 
 // ------------------------------------------------------------------------------------------
@@ -697,6 +699,7 @@ bool RowHidden(const Ctl& c) {
   if (g_vr_smooth_row >= 0 && &c == &g_c[g_vr_smooth_row]) return !VrChosen();
   if ((g_vr_ffr_row >= 0 && &c == &g_c[g_vr_ffr_row]) || (g_vr_edge_row >= 0 && &c == &g_c[g_vr_edge_row]))
     return !VrChosen();
+  if (g_vr_ffr_extra_row >= 0 && &c == &g_c[g_vr_ffr_extra_row]) return !VrChosen();
   if (g_fps >= 0 && &c == &g_c[g_fps] && VrChosen()) return true;
   if (g_fps_cap >= 0 && &c == &g_c[g_fps_cap] && VrChosen()) return true;
   if (VrHidesRow(c)) return true;
@@ -1669,6 +1672,12 @@ void BuildModel() {
                      L"\x2022 Strong: a smaller sharp middle, the most FPS.\n"
                      L"Note: it helps when the graphics card is the limit (a few FPS); the edges of the scene only.",
                      {L"Off", L"Light", L"Medium", L"Strong"}, {"@vrffr", "", "", ""}, 0);
+  g_vr_ffr_extra_row = seg(L"Foveated reflections and occlusion",
+                           L"With foveated rendering on, the reflections and the ambient occlusion are drawn with less detail "
+                           L"at the edges of each eye too.\n"
+                           L"\x2022 A few more FPS when the graphics card is the limit.\n"
+                           L"Note: it does nothing while Foveated rendering is Off.",
+                           {L"Off", L"On"}, {"@vrffrx", ""}, 0);
   g_vr_edge_row = seg(L"Edge margin (frame generation)",
                       L"Black edges when you turn your head come from generated frames: an older picture turned to "
                       L"your new head position has nothing at the side you turn to.\n"
@@ -1789,6 +1798,16 @@ void BuildModel() {
                           L"Uses photo mode's finer reflections on the road and the cars in races.\n"
                           L"\x2022 The difference is hard to see.",
                           "@gfx", false);
+  g_gfx[kGfxSsrOn] = toggle(L"Screen-space reflections",
+                            L"The reflections of the scene on wet roads, puddles and car bodies.\n"
+                            L"\x2022 Off: a few FPS more (about 1.2 ms a frame at headset sizes).\n"
+                            L"Note: in the rain the wet road loses its reflections.",
+                            "@gfx", true);
+  g_gfx[kGfxSsao] = toggle(L"Ambient occlusion",
+                           L"Soft shading in corners and where objects meet the ground.\n"
+                           L"\x2022 Off: several FPS more (about 1.4 ms a frame at headset sizes).\n"
+                           L"Note: off, the shade where tree shadows overlap looks darker.",
+                           "@gfx", true);
   g_gfx[kGfxShadows] = seg(L"Shadow edges",
                            L"How smooth the edges of shadows are.\n"
                            L"\x2022 Game: 32 samples near the car, 8 for shadows further than 4 m.\n"
@@ -2005,15 +2024,15 @@ void BuildModel() {
                      L"For SDR. With HDR on, use HDR brightness.\nIn game: Page Up / Page Down change the brightness; F4 picks contrast or gamma."});
   g_cards.push_back({L"VR HEADSET (EXPERIMENTAL)", {vr, vr_stereo, g_vrsize, g_vr_scale_row, g_vr_smooth_row}, 0, kTabVr,
                      L"Setup and the headset apps: VR README.md next to the game."});
-  g_cards.push_back({L"VR PICTURE AND FRAME RATE", {g_vr_aa_row, g_vr_up_row, g_vr_glow_row, g_vr_exposure_row, g_vr_ffr_row, g_vr_edge_row}, 0, kTabVr,
+  g_cards.push_back({L"VR PICTURE AND FRAME RATE", {g_vr_aa_row, g_vr_up_row, g_vr_glow_row, g_vr_exposure_row, g_vr_ffr_row, g_vr_ffr_extra_row, g_vr_edge_row}, 0, kTabVr,
                      L"FXAA and the other camera effects are on the Detail tab; DLSS's sharpness on the Display tab."});
   g_cards.push_back({L"VR KEYS IN GAME", {}, 0, kTabVr,
                      L"0 recentres the view. 2 / 1 seat up / down, 5 / 6 left / right, 4 / 3 forward / back (Ctrl: "
                      L"bigger steps; the keypad works too). [ / ] the picture darker / brighter. F12 the FPS on the "
                      L"monitor."});
   g_cards.push_back({L"SCENE DETAIL", {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery],
-                                      g_gfx[kGfxShadows], g_gfx[kGfxParticles], g_texture_repetition}, 0, kTabDetail});
-  g_cards.push_back({L"REFLECTIONS", {g_gfx[kGfxSsr], g_mirror}, 0, kTabDetail});
+                                      g_gfx[kGfxShadows], g_gfx[kGfxSsao], g_gfx[kGfxParticles], g_texture_repetition}, 0, kTabDetail});
+  g_cards.push_back({L"REFLECTIONS", {g_gfx[kGfxSsrOn], g_gfx[kGfxSsr], g_mirror}, 0, kTabDetail});
   g_cards.push_back({L"CAMERA EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail});
   g_cards.push_back({L"NEURAL RENDERING", {g_neural, g_nr_sub[0], g_nr_sub[1], g_nr_sub[2], g_nr_sub[3], g_nr_sub[4]}, 0, kTabDetail,
                      L"Touches up the picture after upscaling. Needs a GeForce RTX card and NVIDIA's own nvngx_dlssnr.dll in the runtime folder: this release does not include it."});
@@ -2201,6 +2220,7 @@ void LoadSettings() {
     if (line.rfind("vr_smooth=", 0) == 0) g_vr_smooth = (std::clamp)(atoi(line.substr(10).c_str()), 0, 2);
     if (line.rfind("vr_ffr=", 0) == 0) g_vr_ffr = (std::clamp)(atoi(line.substr(7).c_str()), 0, 3);
     if (line.rfind("vr_edge=", 0) == 0) g_vr_edge = (std::clamp)(atoi(line.substr(8).c_str()), 0, 3);
+    if (line.rfind("vr_ffr_extra=", 0) == 0) g_vr_ffr_extra = atoi(line.substr(13).c_str()) != 0;
     if (line.rfind("vr_auto=", 0) == 0) g_vr_auto = line.substr(8) == "1", g_vr_auto_saved = true;
     if (line.rfind("vr_scale=", 0) == 0) g_vr_scale = (std::clamp)(atoi(line.substr(9).c_str()), 50, 200);
     if (line.rfind("vr_glow=", 0) == 0) g_vr_glow = (std::clamp)(atoi(line.substr(8).c_str()), 0, 100);
@@ -2321,6 +2341,10 @@ void LoadSettings() {
     }
     if (c.kind == Kind::Segmented && c.patches[0] == "@vredge") {
       c.sel = g_vr_edge;
+      continue;
+    }
+    if (c.kind == Kind::Segmented && c.patches[0] == "@vrffrx") {
+      c.sel = g_vr_ffr_extra;
       continue;
     }
     if (c.kind == Kind::Segmented && c.patches[0] == "@vrexposure") {
@@ -2561,7 +2585,7 @@ void ApplyPreset(int preset) {
   if (g_aspect >= 0) g_c[g_aspect].sel = 0;
   if (g_mirror >= 0) g_c[g_mirror].sel = kPresetMirror[preset];
   if (preset == 5) {  // Ultra: every feature of the Graphics tab on, at its best. Neural rendering stays as it is: it needs NVIDIA's own file.
-    for (int k : {kGfxCar, kGfxOpp, kGfxSsr, kGfxParticles, kGfxBlur, kGfxDust, kGfxHaze, kGfxFxaa})
+    for (int k : {kGfxCar, kGfxOpp, kGfxSsr, kGfxParticles, kGfxBlur, kGfxDust, kGfxHaze, kGfxFxaa, kGfxSsrOn, kGfxSsao})
       if (g_gfx[k] >= 0) g_c[g_gfx[k]].sel = 1;
     for (int k : {kGfxScenery, kGfxShadows})
       if (g_gfx[k] >= 0) g_c[g_gfx[k]].sel = 2;  // Ultra
@@ -2628,6 +2652,7 @@ bool SaveSettings() {
       if (c.kind == Kind::Segmented && c.patches[0] == "@vrffr") g_vr_ffr = c.sel;
       if (c.kind == Kind::Segmented && c.patches[0] == "@vrsmooth") g_vr_smooth = c.sel;
       if (c.kind == Kind::Segmented && c.patches[0] == "@vredge") g_vr_edge = c.sel;
+      if (c.kind == Kind::Segmented && c.patches[0] == "@vrffrx") g_vr_ffr_extra = c.sel;
       if (g_vrsize >= 0 && &c == &g_c[g_vrsize]) g_vr_auto = c.sel == kVrSizeAuto;
       if (g_vr_scale_row >= 0 && &c == &g_c[g_vr_scale_row]) g_vr_scale = c.sel;
       if (g_vr_glow_row >= 0 && &c == &g_c[g_vr_glow_row]) g_vr_glow = c.sel;
@@ -2640,7 +2665,7 @@ bool SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@triggers") triggers_saved = c.sel != 0 ? 1 : 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel >= 3) ? g_c[g_fps].sel - 2 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : fgen_saved) <<"\r\nname=" << Narrow(g_name) << "\r\nprofile=" << (g_profile_row >= 0 ? g_c[g_profile_row].sel : 0) << "\r\nonline=" << (g_online_row >= 0 ? g_c[g_online_row].sel : 0) << "\r\nonline_host=" << Narrow(g_online_host) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\nskip_intro=" << ((g_skip_intro_row >= 0 && g_c[g_skip_intro_row].sel) ? 1 : 0) << "\r\nunlock_all=" << (unlock_all_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nvr=" << (g_vr ? 1 : 0) << "\r\nvr_stereo=" << (g_vr_stereo ? 1 : 0) << "\r\nvr_taa=" << (g_vr_taa ? 1 : 0) << "\r\nvr_smaa=" << (g_vr_smaa ? 1 : 0) << "\r\nvr_aa=" << (g_vr_aa >= 0 ? g_vr_aa : 0) << "\r\nvr_up=" << g_vr_up << "\r\nvr_smooth=" << g_vr_smooth << "\r\nvr_ffr=" << g_vr_ffr << "\r\nvr_edge=" << g_vr_edge << "\r\nvr_auto=" << (g_vr_auto ? 1 : 0) << "\r\nvr_scale=" << g_vr_scale << "\r\nvr_glow=" << g_vr_glow << "\r\nvr_exposure=" << g_vr_exposure << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel >= 3) ? g_c[g_fps].sel - 2 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : fgen_saved) <<"\r\nname=" << Narrow(g_name) << "\r\nprofile=" << (g_profile_row >= 0 ? g_c[g_profile_row].sel : 0) << "\r\nonline=" << (g_online_row >= 0 ? g_c[g_online_row].sel : 0) << "\r\nonline_host=" << Narrow(g_online_host) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\nskip_intro=" << ((g_skip_intro_row >= 0 && g_c[g_skip_intro_row].sel) ? 1 : 0) << "\r\nunlock_all=" << (unlock_all_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nvr=" << (g_vr ? 1 : 0) << "\r\nvr_stereo=" << (g_vr_stereo ? 1 : 0) << "\r\nvr_taa=" << (g_vr_taa ? 1 : 0) << "\r\nvr_smaa=" << (g_vr_smaa ? 1 : 0) << "\r\nvr_aa=" << (g_vr_aa >= 0 ? g_vr_aa : 0) << "\r\nvr_up=" << g_vr_up << "\r\nvr_smooth=" << g_vr_smooth << "\r\nvr_ffr=" << g_vr_ffr << "\r\nvr_edge=" << g_vr_edge << "\r\nvr_ffr_extra=" << g_vr_ffr_extra << "\r\nvr_auto=" << (g_vr_auto ? 1 : 0) << "\r\nvr_scale=" << g_vr_scale << "\r\nvr_glow=" << g_vr_glow << "\r\nvr_exposure=" << g_vr_exposure << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
@@ -3953,6 +3978,8 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     gc.lens_dust = VrChosen() ? 0 : sel(kGfxDust, 1);  // VR: a camera's lens, not an eye
     gc.heat_haze = sel(kGfxHaze, 1);
     gc.fxaa = sel(kGfxFxaa, 1);
+    gc.ssr = sel(kGfxSsrOn, 1);
+    gc.ssao = sel(kGfxSsao, 1);
     gc.dynamic_res = VrChosen() ? 0 : sel(kGfxDynres, 1);
     const std::wstring graphics_dir = g_data + L"\\graphics";
     bool active = false;
@@ -4187,6 +4214,8 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     const bool scaled = g_vr && g_vrsize >= 0 && g_c[g_vrsize].sel == kVrSizeAuto && g_vr_scale_row >= 0;
     SetEnvironmentVariableW(L"BB_VR_SCALE", scaled ? std::to_wstring(g_c[g_vr_scale_row].sel).c_str() : nullptr);
   }
+  if (!UserEnv(L"BB_VR_FFR_EXTRA"))
+    SetEnvironmentVariableW(L"BB_VR_FFR_EXTRA", g_vr && g_vr_ffr && g_vr_ffr_extra ? L"1" : nullptr);
   if (!UserEnv(L"BB_VR_EDGE_MARGIN"))
     SetEnvironmentVariableW(L"BB_VR_EDGE_MARGIN", g_vr ? std::to_wstring(kEdgeDegrees[g_vr_edge]).c_str() : nullptr);
   static const wchar_t* const kExposureBias[5] = {L"-1", L"-0.5", L"0", L"0.5", L"1"};
